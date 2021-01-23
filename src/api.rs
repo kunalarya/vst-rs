@@ -500,6 +500,10 @@ impl<'a> Iterator for EventIterator<'a> {
 #[repr(i32)]
 #[derive(Copy, Clone, Debug)]
 pub enum EventType {
+    /// Value used for uninitialized placeholder events.
+    /// (https://github.com/RustAudio/vst-rs/pull/138/files)
+    _Placeholder = 0,
+
     /// Midi event. See `api::MidiEvent`.
     Midi = 1,
 
