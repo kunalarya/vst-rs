@@ -78,7 +78,8 @@ impl Plugin for GainEffect {
         match index {
             0 => "Amplitude",
             _ => "",
-        }.to_string()
+        }
+        .to_string()
     }
 
     // Here is where the bulk of our audio processing code goes.
