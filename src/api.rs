@@ -90,11 +90,11 @@ pub struct AEffect {
     /// Number of audio outputs.
     pub numOutputs: i32,
 
-    /// Bitmask made of values from api::flags.
+    /// Bitmask made of values from `api::PluginFlags`.
     ///
     /// ```no_run
-    /// use vst::api::flags;
-    /// let flags = flags::CAN_REPLACING | flags::CAN_DOUBLE_REPLACING;
+    /// use vst::api::PluginFlags;
+    /// let flags = PluginFlags::CAN_REPLACING | PluginFlags::CAN_DOUBLE_REPLACING;
     /// // ...
     /// ```
     pub flags: i32,
@@ -145,16 +145,15 @@ pub struct AEffect {
 impl AEffect {
     /// Return handle to Plugin object. Only works for plugins created using this library.
     // Supresses warning about returning a reference to a box
-    #[allow(unknown_lints)]
-    #[allow(borrowed_box)]
-    pub unsafe fn get_plugin(&mut self) -> &mut Box<Plugin> {
+    #[allow(clippy::borrowed_box)]
+    pub unsafe fn get_plugin(&mut self) -> &mut Box<dyn Plugin> {
         //FIXME: find a way to do this without resorting to transmuting via a box
-        &mut *(self.object as *mut Box<Plugin>)
+        &mut *(self.object as *mut Box<dyn Plugin>)
     }
 
     /// Drop the Plugin object. Only works for plugins created using this library.
     pub unsafe fn drop_plugin(&mut self) {
-        drop(Box::from_raw(self.object as *mut Box<Plugin>));
+        drop(Box::from_raw(self.object as *mut Box<dyn Plugin>));
         drop(Box::from_raw(self.user as *mut super::PluginCache));
     }
 
@@ -169,7 +168,7 @@ pub struct ChannelProperties {
     /// Channel name.
     pub name: [u8; MAX_LABEL as usize],
 
-    /// Flags found in `channel_flags` module.
+    /// Flags found in `ChannelFlags`.
     pub flags: i32,
 
     /// Type of speaker arrangement this channel is a part of.
@@ -267,10 +266,12 @@ pub enum SpeakerArrangementType {
 
 /// Used to specify whether functionality is supported.
 #[allow(missing_docs)]
+#[derive(PartialEq, Eq)]
 pub enum Supported {
     Yes,
     Maybe,
     No,
+    Custom(isize),
 }
 
 impl Supported {
@@ -296,6 +297,7 @@ impl Into<isize> for Supported {
             Yes => 1,
             Maybe => 0,
             No => -1,
+            Custom(i) => i,
         }
     }
 }
@@ -466,31 +468,9 @@ impl Events {
     /// # }
     /// ```
     #[inline]
-    pub fn events(&self) -> EventIterator {
-        EventIterator {
-            events: self.events_raw(),
-            index: 0,
-        }
-    }
-}
-
-/// An iterator over events, returned by `api::Events::events`
-pub struct EventIterator<'a> {
-    events: &'a [*const Event],
-    index: usize,
-}
-
-impl<'a> Iterator for EventIterator<'a> {
-    type Item = ::event::Event<'a>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let index = self.index;
-        if index < self.events.len() {
-            self.index += 1;
-            Some(::event::Event::from(unsafe { *self.events[index] }))
-        } else {
-            None
-        }
+    #[allow(clippy::needless_lifetimes)]
+    pub fn events<'a>(&'a self) -> impl Iterator<Item = ::event::Event<'a>> {
+        self.events_raw().iter().map(|ptr| unsafe { **ptr }.into())
     }
 }
 
@@ -499,7 +479,6 @@ impl<'a> Iterator for EventIterator<'a> {
 #[derive(Copy, Clone, Debug)]
 pub enum EventType {
     /// Value used for uninitialized placeholder events.
-    /// (https://github.com/RustAudio/vst-rs/pull/138/files)
     _Placeholder = 0,
 
     /// Midi event. See `api::MidiEvent`.
@@ -599,7 +578,7 @@ pub struct MidiEvent {
     /// `samples[123]`.
     pub delta_frames: i32,
 
-    /// See `flags::MidiFlags`.
+    /// See `MidiEventFlags`.
     pub flags: i32,
 
     /// Length in sample frames of entire note if available, otherwise 0.
@@ -707,7 +686,7 @@ pub struct TimeInfo {
     /// MIDI Clock Resolution (24 Per Quarter Note), can be negative (nearest clock)
     pub samples_to_next_clock: i32,
 
-    /// See `flags::TimeInfo`
+    /// See `TimeInfoFlags`
     pub flags: i32,
 }
 
@@ -749,95 +728,190 @@ impl Default for SmpteFrameRate {
     }
 }
 
-/// Bitflags.
-pub mod flags {
-    bitflags! {
-        /// Flags for VST channels.
-        pub flags Channel: i32 {
-            /// Indicates channel is active. Ignored by host.
-            const ACTIVE = 1,
-            /// Indicates channel is first of stereo pair.
-            const STEREO = 1 << 1,
-            /// Use channel's specified speaker_arrangement instead of stereo flag.
-            const SPEAKER = 1 << 2
-        }
+bitflags! {
+    /// Flags for VST channels.
+    pub struct ChannelFlags: i32 {
+        /// Indicates channel is active. Ignored by host.
+        const ACTIVE = 1;
+        /// Indicates channel is first of stereo pair.
+        const STEREO = 1 << 1;
+        /// Use channel's specified speaker_arrangement instead of stereo flag.
+        const SPEAKER = 1 << 2;
+    }
+}
+
+bitflags! {
+    /// Flags for VST plugins.
+    pub struct PluginFlags: i32 {
+        /// Plugin has an editor.
+        const HAS_EDITOR = 1;
+        /// Plugin can process 32 bit audio. (Mandatory in VST 2.4).
+        const CAN_REPLACING = 1 << 4;
+        /// Plugin preset data is handled in formatless chunks.
+        const PROGRAM_CHUNKS = 1 << 5;
+        /// Plugin is a synth.
+        const IS_SYNTH = 1 << 8;
+        /// Plugin does not produce sound when all input is silence.
+        const NO_SOUND_IN_STOP = 1 << 9;
+        /// Supports 64 bit audio processing.
+        const CAN_DOUBLE_REPLACING = 1 << 12;
+    }
+}
+
+bitflags! {
+    /// Cross platform modifier key flags.
+    pub struct ModifierKey: u8 {
+        /// Shift key.
+        const SHIFT = 1;
+        /// Alt key.
+        const ALT = 1 << 1;
+        /// Control on mac.
+        const COMMAND = 1 << 2;
+        /// Command on mac, ctrl on other.
+        const CONTROL = 1 << 3; // Ctrl on PC, Apple on Mac
+    }
+}
+
+bitflags! {
+    /// MIDI event flags.
+    pub struct MidiEventFlags: i32 {
+        /// This event is played live (not in playback from a sequencer track). This allows the
+        /// plugin to handle these flagged events with higher priority, especially when the
+        /// plugin has a big latency as per `plugin::Info::initial_delay`.
+        const REALTIME_EVENT = 1;
+    }
+}
+
+bitflags! {
+    /// Used in the `flags` field of `TimeInfo`, and for querying the host for specific values
+    pub struct TimeInfoFlags : i32 {
+        /// Indicates that play, cycle or record state has changed.
+        const TRANSPORT_CHANGED = 1;
+        /// Set if Host sequencer is currently playing.
+        const TRANSPORT_PLAYING = 1 << 1;
+        /// Set if Host sequencer is in cycle mode.
+        const TRANSPORT_CYCLE_ACTIVE = 1 << 2;
+        /// Set if Host sequencer is in record mode.
+        const TRANSPORT_RECORDING = 1 << 3;
+
+        /// Set if automation write mode active (record parameter changes).
+        const AUTOMATION_WRITING = 1 << 6;
+        /// Set if automation read mode active (play parameter changes).
+        const AUTOMATION_READING = 1 << 7;
+
+        /// Set if TimeInfo::nanoseconds is valid.
+        const NANOSECONDS_VALID = 1 << 8;
+        /// Set if TimeInfo::ppq_pos is valid.
+        const PPQ_POS_VALID = 1 << 9;
+        /// Set if TimeInfo::tempo is valid.
+        const TEMPO_VALID = 1 << 10;
+        /// Set if TimeInfo::bar_start_pos is valid.
+        const BARS_VALID = 1 << 11;
+        /// Set if both TimeInfo::cycle_start_pos and VstTimeInfo::cycle_end_pos are valid.
+        const CYCLE_POS_VALID = 1 << 12;
+        /// Set if both TimeInfo::time_sig_numerator and TimeInfo::time_sig_denominator are valid.
+        const TIME_SIG_VALID = 1 << 13;
+        /// Set if both TimeInfo::smpte_offset and VstTimeInfo::smpte_frame_rate are valid.
+        const SMPTE_VALID = 1 << 14;
+        /// Set if TimeInfo::samples_to_next_clock is valid.
+        const VST_CLOCK_VALID = 1 << 15;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::event;
+    use super::*;
+    use std::mem;
+
+    // This container is used because we have to store somewhere the events
+    // that are pointed to by raw pointers in the events object. We heap allocate
+    // the event so the pointer in events stays consistent when the container is moved.
+    pub struct EventContainer {
+        stored_event: Box<Event>,
+        pub events: Events,
     }
 
-    bitflags! {
-        /// Flags for VST plugins.
-        pub flags Plugin: i32 {
-            /// Plugin has an editor.
-            const HAS_EDITOR = 1,
-            /// Plugin can process 32 bit audio. (Mandatory in VST 2.4).
-            const CAN_REPLACING = 1 << 4,
-            /// Plugin preset data is handled in formatless chunks.
-            const PROGRAM_CHUNKS = 1 << 5,
-            /// Plugin is a synth.
-            const IS_SYNTH = 1 << 8,
-            /// Plugin does not produce sound when all input is silence.
-            const NO_SOUND_IN_STOP = 1 << 9,
-            /// Supports 64 bit audio processing.
-            const CAN_DOUBLE_REPLACING = 1 << 12
-        }
+    // A convenience method which creates an api::Events object representing a midi event.
+    // This represents code that might be found in a VST host using this API.
+    fn encode_midi_message_as_events(message: [u8; 3]) -> EventContainer {
+        let midi_event: MidiEvent = MidiEvent {
+            event_type: EventType::Midi,
+            byte_size: mem::size_of::<MidiEvent>() as i32,
+            delta_frames: 0,
+            flags: 0,
+            note_length: 0,
+            note_offset: 0,
+            midi_data: [message[0], message[1], message[2]],
+            _midi_reserved: 0,
+            detune: 0,
+            note_off_velocity: 0,
+            _reserved1: 0,
+            _reserved2: 0,
+        };
+        let mut event: Event = unsafe { std::mem::transmute(midi_event) };
+        event.event_type = EventType::Midi;
+
+        let events = Events {
+            num_events: 1,
+            _reserved: 0,
+            events: [&mut event, &mut event], // Second one is a dummy
+        };
+        let mut ec = EventContainer {
+            stored_event: Box::new(event),
+            events,
+        };
+        ec.events.events[0] = &mut *(ec.stored_event); // Overwrite ptrs, since we moved the event into ec
+        ec
     }
 
-    bitflags! {
-        /// Cross platform modifier key flags.
-        pub flags ModifierKey: u8 {
-            /// Shift key.
-            const SHIFT = 1,
-            /// Alt key.
-            const ALT = 1 << 1,
-            /// Control on mac.
-            const COMMAND = 1 << 2,
-            /// Command on mac, ctrl on other.
-            const CONTROL = 1 << 3, // Ctrl on PC, Apple on Mac
-        }
+    #[test]
+    fn encode_and_decode_gives_back_original_message() {
+        let message: [u8; 3] = [35, 16, 22];
+        let encoded = encode_midi_message_as_events(message);
+        assert_eq!(encoded.events.num_events, 1);
+        assert_eq!(encoded.events.events.len(), 2);
+        let e_vec: Vec<event::Event> = encoded.events.events().collect();
+        assert_eq!(e_vec.len(), 1);
+
+        match e_vec[0] {
+            event::Event::Midi(event::MidiEvent { data, .. }) => {
+                assert_eq!(data, message);
+            }
+            _ => {
+                panic!("Not a midi event!");
+            }
+        };
     }
 
-    bitflags! {
-        /// MIDI event flags.
-        pub flags MidiEvent: i32 {
-            /// This event is played live (not in playback from a sequencer track). This allows the
-            /// plugin to handle these flagged events with higher priority, especially when the
-            /// plugin has a big latency as per `plugin::Info::initial_delay`.
-            const REALTIME_EVENT = 1,
+    // This is a regression test for a bug fixed in PR #93
+    // We check here that calling events() on an api::Events object
+    // does not mutate the underlying events.
+    #[test]
+    fn message_survives_calling_events() {
+        let message: [u8; 3] = [35, 16, 22];
+        let encoded = encode_midi_message_as_events(message);
+
+        for e in encoded.events.events() {
+            match e {
+                event::Event::Midi(event::MidiEvent { data, .. }) => {
+                    assert_eq!(data, message);
+                }
+                _ => {
+                    panic!("Not a midi event!");
+                }
+            }
         }
-    }
 
-    bitflags! {
-        /// Used in the `flags` field of `TimeInfo`, and for querying the host for specific values
-        pub flags TimeInfo : i32 {
-            /// Indicates that play, cycle or record state has changed.
-            const TRANSPORT_CHANGED = 1,
-            /// Set if Host sequencer is currently playing.
-            const TRANSPORT_PLAYING = 1 << 1,
-            /// Set if Host sequencer is in cycle mode.
-            const TRANSPORT_CYCLE_ACTIVE = 1 << 2,
-            /// Set if Host sequencer is in record mode.
-            const TRANSPORT_RECORDING = 1 << 3,
-
-            /// Set if automation write mode active (record parameter changes).
-            const AUTOMATION_WRITING = 1 << 6,
-            /// Set if automation read mode active (play parameter changes).
-            const AUTOMATION_READING = 1 << 7,
-
-            /// Set if TimeInfo::nanoseconds is valid.
-            const NANOSECONDS_VALID = 1 << 8,
-            /// Set if TimeInfo::ppq_pos is valid.
-            const PPQ_POS_VALID = 1 << 9,
-            /// Set if TimeInfo::tempo is valid.
-            const TEMPO_VALID = 1 << 10,
-            /// Set if TimeInfo::bar_start_pos is valid.
-            const BARS_VALID = 1 << 11,
-            /// Set if both TimeInfo::cycle_start_pos and VstTimeInfo::cycle_end_pos are valid.
-            const CYCLE_POS_VALID = 1 << 12,
-            /// Set if both TimeInfo::time_sig_numerator and TimeInfo::time_sig_denominator are valid.
-            const TIME_SIG_VALID = 1 << 13,
-            /// Set if both TimeInfo::smpte_offset and VstTimeInfo::smpte_frame_rate are valid.
-            const SMPTE_VALID = 1 << 14,
-            /// Set if TimeInfo::samples_to_next_clock is valid.
-            const VST_CLOCK_VALID = 1 << 15
+        for e in encoded.events.events() {
+            match e {
+                event::Event::Midi(event::MidiEvent { data, .. }) => {
+                    assert_eq!(data, message);
+                }
+                _ => {
+                    panic!("Not a midi event!"); // FAILS here!
+                }
+            }
         }
     }
 }

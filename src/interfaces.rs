@@ -83,7 +83,7 @@ pub fn get_parameter(effect: *mut AEffect, index: i32) -> f32 {
 /// String will be cut at `max` characters.
 fn copy_string(dst: *mut c_void, src: &str, max: usize) -> isize {
     unsafe {
-        use libc::{c_void, memcpy, memset};
+        use libc::{memcpy, memset};
         use std::cmp::min;
 
         let dst = dst as *mut c_void;
@@ -167,18 +167,18 @@ pub fn dispatch(
             }
         }
         OpCode::EditorOpen => {
-            if let Some(editor) = plugin.get_editor() {
+            if let Some(ref mut editor) = plugin.get_editor() {
                 editor.open(ptr); //ptr is raw window handle, eg HWND* on windows
             }
         }
         OpCode::EditorClose => {
-            if let Some(editor) = plugin.get_editor() {
+            if let Some(ref mut editor) = plugin.get_editor() {
                 editor.close();
             }
         }
 
         OpCode::EditorIdle => {
-            if let Some(editor) = plugin.get_editor() {
+            if let Some(ref mut editor) = plugin.get_editor() {
                 editor.idle();
             }
         }
@@ -242,6 +242,10 @@ pub fn dispatch(
             return plugin.get_info().category.into();
         }
 
+        OpCode::GetEffectName => {
+            return copy_string(ptr, &plugin.get_info().name, MAX_VENDOR_STR_LEN)
+        }
+
         OpCode::GetVendorName => {
             return copy_string(ptr, &plugin.get_info().vendor, MAX_VENDOR_STR_LEN)
         }
@@ -266,25 +270,25 @@ pub fn dispatch(
         OpCode::GetApiVersion => return 2400,
 
         OpCode::EditorKeyDown => {
-            if let Some(editor) = plugin.get_editor() {
+            if let Some(ref mut editor) = plugin.get_editor() {
                 editor.key_down(KeyCode {
                     character: index as u8 as char,
                     key: Key::from(value),
-                    modifier: unsafe { mem::transmute::<f32, i32>(opt) } as u8,
+                    modifier: opt.to_bits() as u8,
                 });
             }
         }
         OpCode::EditorKeyUp => {
-            if let Some(editor) = plugin.get_editor() {
+            if let Some(ref mut editor) = plugin.get_editor() {
                 editor.key_up(KeyCode {
                     character: index as u8 as char,
                     key: Key::from(value),
-                    modifier: unsafe { mem::transmute::<f32, i32>(opt) } as u8,
+                    modifier: opt.to_bits() as u8,
                 });
             }
         }
         OpCode::EditorSetKnobMode => {
-            if let Some(editor) = plugin.get_editor() {
+            if let Some(ref mut editor) = plugin.get_editor() {
                 editor.set_knob_mode(KnobMode::from(value));
             }
         }
@@ -315,7 +319,7 @@ pub fn dispatch(
 }
 
 pub fn host_dispatch(
-    host: &mut Host,
+    host: &mut dyn Host,
     effect: *mut AEffect,
     opcode: i32,
     index: i32,
@@ -328,6 +332,8 @@ pub fn host_dispatch(
     match OpCode::from(opcode) {
         OpCode::Version => return 2400,
         OpCode::Automate => host.automate(index, opt),
+        OpCode::BeginEdit => host.begin_edit(index),
+        OpCode::EndEdit => host.end_edit(index),
 
         OpCode::Idle => host.idle(),
 

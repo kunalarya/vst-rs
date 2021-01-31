@@ -3,8 +3,7 @@
 
 use std::{mem, slice};
 
-use api::flags::*;
-use api::{self, flags};
+use api;
 
 /// A VST event.
 #[derive(Copy, Clone)]
@@ -96,12 +95,12 @@ impl<'a> From<api::Event> for Event<'a> {
                 } else {
                     None
                 };
-                let flags = flags::MidiEvent::from_bits(event.flags).unwrap();
+                let flags = api::MidiEventFlags::from_bits(event.flags).unwrap();
 
                 Event::Midi(MidiEvent {
                     data: event.midi_data,
                     delta_frames: event.delta_frames,
-                    live: flags.intersects(REALTIME_EVENT),
+                    live: flags.intersects(api::MidiEventFlags::REALTIME_EVENT),
                     note_length: length,
                     note_offset: offset,
                     detune: event.detune,
@@ -111,9 +110,9 @@ impl<'a> From<api::Event> for Event<'a> {
 
             SysEx => Event::SysEx(SysExEvent {
                 payload: unsafe {
-                    // We can safely transmute the event pointer to a `SysExEvent` pointer as
+                    // We can safely cast the event pointer to a `SysExEvent` pointer as
                     // event_type refers to a `SysEx` type.
-                    #[allow(cast_ptr_alignment)]
+                    #[allow(clippy::cast_ptr_alignment)]
                     let event: &api::SysExEvent =
                         &*(&event as *const api::Event as *const api::SysExEvent);
                     slice::from_raw_parts(event.system_data, event.data_size as usize)

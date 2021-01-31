@@ -454,6 +454,19 @@ impl Into<String> for CanDo {
 ///
 /// All methods except `get_info` provide a default implementation which does nothing and can be
 /// safely overridden.
+///
+/// At any time, a plugin is in one of two states: *suspended* or *resumed*.
+/// While a plugin is in the *suspended* state, various processing parameters,
+/// such as the sample rate and block size, can be changed by the host, but no
+/// audio processing takes place. While a plugin is in the *resumed* state,
+/// audio processing methods and parameter access methods can be called by
+/// the host. A plugin starts in the *suspended* state and is switched between
+/// the states by the host using the `resume` and `suspend` methods.
+///
+/// Hosts call methods of the plugin on two threads: the UI thread and the
+/// processing thread. For this reason, the plugin API is separated into two
+/// traits: The `Plugin` trait containing setup and processing methods, and
+/// the `PluginParameters` trait containing methods for parameter access.
 #[allow(unused_variables)]
 pub trait Plugin {
     /// This method must return an `Info` struct.
@@ -507,6 +520,8 @@ pub trait Plugin {
     }
 
     /// Called when plugin is fully initialized.
+    ///
+    /// This method is only called while the plugin is in the *suspended* state.
     fn init(&mut self) {
         trace!("Initialized vst plugin.");
     }
@@ -563,15 +578,19 @@ pub trait Plugin {
     }
 
     /// Called when sample rate is changed by host.
+    ///
+    /// This method is only called while the plugin is in the *suspended* state.
     fn set_sample_rate(&mut self, rate: f32) {}
 
     /// Called when block size is changed by host.
+    ///
+    /// This method is only called while the plugin is in the *suspended* state.
     fn set_block_size(&mut self, size: i64) {}
 
-    /// Called when plugin is turned on.
+    /// Called to transition the plugin into the *resumed* state.
     fn resume(&mut self) {}
 
-    /// Called when plugin is turned off.
+    /// Called to transition the plugin into the *suspended* state.
     fn suspend(&mut self) {}
 
     /// Vendor specific handling.
@@ -580,6 +599,8 @@ pub trait Plugin {
     }
 
     /// Return whether plugin supports specified action.
+    ///
+    /// This method is only called while the plugin is in the *suspended* state.
     fn can_do(&self, can_do: CanDo) -> Supported {
         info!("Host is asking if plugin can: {:?}.", can_do);
         Supported::Maybe
@@ -619,11 +640,13 @@ pub trait Plugin {
     /// }
     /// # }
     /// ```
+    ///
+    /// This method is only called while the plugin is in the *resumed* state.
     fn process(&mut self, buffer: &mut AudioBuffer<f32>) {
         // For each input and output
         for (input, output) in buffer.zip() {
             // For each input sample and output sample in buffer
-            for (in_frame, out_frame) in input.into_iter().zip(output.into_iter()) {
+            for (in_frame, out_frame) in input.iter().zip(output.iter_mut()) {
                 *out_frame = *in_frame;
             }
         }
@@ -658,11 +681,13 @@ pub trait Plugin {
     /// }
     /// # }
     /// ```
+    ///
+    /// This method is only called while the plugin is in the *resumed* state.
     fn process_f64(&mut self, buffer: &mut AudioBuffer<f64>) {
         // For each input and output
         for (input, output) in buffer.zip() {
             // For each input sample and output sample in buffer
-            for (in_frame, out_frame) in input.into_iter().zip(output.into_iter()) {
+            for (in_frame, out_frame) in input.iter().zip(output.iter_mut()) {
                 *out_frame = *in_frame;
             }
         }
@@ -671,12 +696,9 @@ pub trait Plugin {
     /// Handle incoming events sent from the host.
     ///
     /// This is always called before the start of `process` or `process_f64`.
+    ///
+    /// This method is only called while the plugin is in the *resumed* state.
     fn process_events(&mut self, events: &api::Events) {}
-
-    /// Return handle to plugin editor if supported.
-    fn get_editor(&mut self) -> Option<&mut Editor> {
-        None
-    }
 
     /// If `preset_chunks` is set to true in plugin info, this should return the raw chunk data for
     /// the current preset.
@@ -719,11 +741,28 @@ pub trait Plugin {
     }
 
     /// Called one time before the start of process call.
-    /// This indicates that the process call will be interrupted (due to Host reconfiguration or bypass state when the plug-in doesn't support softBypass).
-    fn start_process(&self) {}
+    ///
+    /// This indicates that the process call will be interrupted (due to Host reconfiguration
+    /// or bypass state when the plug-in doesn't support softBypass).
+    ///
+    /// This method is only called while the plugin is in the *resumed* state.
+    fn start_process(&mut self) {}
 
     /// Called after the stop of process call.
-    fn stop_process(&self) {}
+    ///
+    /// This method is only called while the plugin is in the *resumed* state.
+    fn stop_process(&mut self) {}
+
+    /// Return handle to plugin editor if supported.
+    /// The method need only return the object on the first call.
+    /// Subsequent calls can just return `None`.
+    ///
+    /// The editor object will typically contain an `Arc` reference to the parameter
+    /// object through which it can communicate with the audio processing.
+    //fn get_editor(&mut self) -> Option<Box<dyn Editor>> {
+    fn get_editor(&mut self) -> Option<&mut dyn Editor> {
+        None
+    }
 }
 
 /// A reference to the host which allows the plugin to call back and access information.
@@ -773,6 +812,7 @@ impl Default for HostCallback {
 }
 
 unsafe impl Send for HostCallback {}
+unsafe impl Sync for HostCallback {}
 
 impl HostCallback {
     /// Wrap callback in a function to avoid using fn pointer notation.
@@ -796,7 +836,7 @@ impl HostCallback {
     #[doc(hidden)]
     fn is_effect_valid(&self) -> bool {
         // Check whether `effect` points to a valid AEffect struct
-        self.effect as i32 != VST_MAGIC
+        unsafe { (*self.effect).magic as i32 == VST_MAGIC }
     }
 
     /// Create a new Host structure wrapping a host callback.
@@ -943,7 +983,7 @@ impl Host for HostCallback {
 
         match ptr {
             0 => None,
-            ptr => Some(unsafe { (*(ptr as *const TimeInfo)) }),
+            ptr => Some(unsafe { *(ptr as *const TimeInfo) }),
         }
     }
 

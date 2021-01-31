@@ -2,19 +2,21 @@
 
 use num_traits::Float;
 
+use libloading::Library;
+use std::cell::UnsafeCell;
 use std::error::Error;
 use std::ffi::CString;
+use std::mem::MaybeUninit;
+use std::os::raw::c_void;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
-use std::{fmt, mem, ptr, slice};
-
-use libloading::Library;
-use std::os::raw::c_void;
+use std::{fmt, ptr, slice};
 
 use api::consts::*;
-use api::{self, AEffect, PluginMain, Supported, TimeInfo};
+use api::{self, AEffect, PluginFlags, PluginMain, Supported, TimeInfo};
 use buffer::AudioBuffer;
 use channels::ChannelInfo;
+// use editor::{Editor, Rect};
 use interfaces;
 use plugin::{self, Category, Info, Plugin};
 
@@ -146,7 +148,9 @@ pub enum OpCode {
     /// Get the current directory.
     /// [return]: `FSSpec` on OS X, `char*` otherwise
     GetDirectory,
-    /// No arguments. TODO: Figure out what this does.
+    /// Tell the host that the plugin's parameters have changed, refresh the UI.
+    ///
+    /// No arguments.
     UpdateDisplay,
     /// Tell the host that if needed, it should record automation data for a control.
     ///
@@ -188,6 +192,12 @@ pub trait Host {
     /// Automate a parameter; the value has been changed.
     fn automate(&mut self, index: i32, value: f32) {}
 
+    /// Signal that automation of a parameter started (the knob has been touched / mouse button down).
+    fn begin_edit(&self, index: i32) {}
+
+    /// Signal that automation of a parameter ended (the knob is no longer been touched / mouse button up).
+    fn end_edit(&self, index: i32) {}
+
     /// Get the plugin ID of the currently loading plugin.
     ///
     /// This is only useful for shell plugins where this value will change the plugin returned.
@@ -221,6 +231,13 @@ pub trait Host {
     fn get_block_size(&self) -> isize {
         0
     }
+
+    /// Refresh UI after the plugin's parameters changed.
+    ///
+    /// Note: some hosts will call some `PluginParameters` methods from within the `update_display`
+    /// call, including `get_parameter`, `get_parameter_label`, `get_parameter_name`
+    /// and `get_parameter_text`.
+    fn update_display(&self) {}
 }
 
 /// All possible errors that can occur when loading a VST plugin.
@@ -244,22 +261,18 @@ pub enum PluginLoadError {
 
 impl fmt::Display for PluginLoadError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}", self.description())
-    }
-}
-
-impl Error for PluginLoadError {
-    fn description(&self) -> &str {
         use self::PluginLoadError::*;
-
-        match *self {
+        let description = match self {
             InvalidPath => "Could not open the requested path",
             NotAPlugin => "The given path does not contain a VST2.4 compatible library",
             InstanceFailed => "Failed to create a plugin instance",
             InvalidApiVersion => "The plugin API version is not compatible with this library",
-        }
+        };
+        write!(f, "{}", description)
     }
 }
+
+impl Error for PluginLoadError {}
 
 /// Wrapper for an externally loaded VST plugin.
 ///
@@ -274,9 +287,10 @@ pub struct PluginLoader<T: Host> {
 /// An instance of an externally loaded VST plugin.
 #[allow(dead_code)] // To keep `lib` around.
 pub struct PluginInstance {
-    effect: *mut AEffect,
+    effect: UnsafeCell<*mut AEffect>,
     lib: Arc<Library>,
     info: Info,
+    is_editor_active: bool,
 }
 
 impl Drop for PluginInstance {
@@ -284,6 +298,78 @@ impl Drop for PluginInstance {
         self.dispatch(plugin::OpCode::Shutdown, 0, 0, ptr::null_mut(), 0.0);
     }
 }
+
+/*
+/// The editor of an externally loaded VST plugin.
+struct EditorInstance {
+    params: Arc<PluginParametersInstance>,
+    is_open: bool,
+}
+
+impl EditorInstance {
+    fn get_rect(&self) -> Option<Rect> {
+        let mut rect: *mut Rect = std::ptr::null_mut();
+        let rect_ptr: *mut *mut Rect = &mut rect;
+
+        let result = self.params.dispatch(
+            plugin::OpCode::EditorGetRect,
+            0,
+            0,
+            rect_ptr as *mut c_void,
+            0.0,
+        );
+
+        if result == 0 || rect.is_null() {
+            return None;
+        }
+        Some(unsafe { *rect }) // TODO: Who owns rect? Who should free the memory?
+    }
+}
+
+impl Editor for EditorInstance {
+    fn size(&self) -> (i32, i32) {
+        // Assuming coordinate origins from top-left
+        match self.get_rect() {
+            None => (0, 0),
+            Some(rect) => (
+                (rect.right - rect.left) as i32,
+                (rect.bottom - rect.top) as i32,
+            ),
+        }
+    }
+
+    fn position(&self) -> (i32, i32) {
+        // Assuming coordinate origins from top-left
+        match self.get_rect() {
+            None => (0, 0),
+            Some(rect) => (rect.left as i32, rect.top as i32),
+        }
+    }
+
+    fn close(&mut self) {
+        self.params
+            .dispatch(plugin::OpCode::EditorClose, 0, 0, ptr::null_mut(), 0.0);
+        self.is_open = false;
+    }
+
+    fn open(&mut self, parent: *mut c_void) -> bool {
+        let result = self
+            .params
+            .dispatch(plugin::OpCode::EditorOpen, 0, 0, parent, 0.0);
+
+        let opened = result == 1;
+        if opened {
+            self.is_open = true;
+        }
+
+        opened
+    }
+
+    fn is_open(&mut self) -> bool {
+        self.is_open
+    }
+}
+*/
 
 impl<T: Host> PluginLoader<T> {
     /// Load a plugin at the given path with the given host.
@@ -388,16 +474,15 @@ impl PluginInstance {
         use plugin::OpCode as op;
 
         let mut plug = PluginInstance {
-            effect,
+            effect: UnsafeCell::new(effect),
             lib,
             info: Default::default(),
+            is_editor_active: false,
         };
 
         unsafe {
-            use api::flags::*;
-
             let effect: &AEffect = &*effect;
-            let flags = Plugin::from_bits_truncate(effect.flags);
+            let flags = PluginFlags::from_bits_truncate(effect.flags);
 
             plug.info = Info {
                 name: plug.read_string(op::GetProductName, MAX_PRODUCT_STR_LEN),
@@ -418,14 +503,18 @@ impl PluginInstance {
 
                 initial_delay: effect.initialDelay,
 
-                preset_chunks: flags.intersects(PROGRAM_CHUNKS),
-                f64_precision: flags.intersects(CAN_DOUBLE_REPLACING),
-                silent_when_stopped: flags.intersects(NO_SOUND_IN_STOP),
+                preset_chunks: flags.intersects(PluginFlags::PROGRAM_CHUNKS),
+                f64_precision: flags.intersects(PluginFlags::CAN_DOUBLE_REPLACING),
+                silent_when_stopped: flags.intersects(PluginFlags::NO_SOUND_IN_STOP),
             };
         }
 
         plug
     }
+}
+
+trait Dispatch {
+    fn get_effect(&self) -> *mut AEffect;
 
     /// Send a dispatch message to the plugin.
     fn dispatch(
@@ -436,11 +525,11 @@ impl PluginInstance {
         ptr: *mut c_void,
         opt: f32,
     ) -> isize {
-        let dispatcher = unsafe { (*self.effect).dispatcher };
+        let dispatcher = unsafe { (*self.get_effect()).dispatcher };
         if (dispatcher as *mut u8).is_null() {
             panic!("Plugin was not loaded correctly.");
         }
-        dispatcher(self.effect, opcode.into(), index, value, ptr, opt)
+        dispatcher(self.get_effect(), opcode.into(), index, value, ptr, opt)
     }
 
     /// Send a lone opcode with no parameters.
@@ -485,6 +574,12 @@ impl PluginInstance {
             .chars()
             .take_while(|c| *c != '\0')
             .collect()
+    }
+}
+
+impl Dispatch for PluginInstance {
+    fn get_effect(&self) -> *mut AEffect {
+        unsafe { *self.effect.get() }
     }
 }
 
@@ -556,11 +651,17 @@ impl Plugin for PluginInstance {
     }
 
     fn get_parameter(&self, index: i32) -> f32 {
-        unsafe { ((*self.effect).getParameter)(self.effect, index) }
+        unsafe {
+            let effect_ptr = self.get_effect();
+            ((*effect_ptr).getParameter)(effect_ptr, index)
+        }
     }
 
     fn set_parameter(&mut self, index: i32, value: f32) {
-        unsafe { ((*self.effect).setParameter)(self.effect, index, value) }
+        unsafe {
+            let effect_ptr = self.get_effect();
+            ((*effect_ptr).setParameter)(effect_ptr, index, value)
+        }
     }
 
     fn can_be_automated(&self, index: i32) -> bool {
@@ -621,8 +722,8 @@ impl Plugin for PluginInstance {
             panic!("Too few outputs in AudioBuffer");
         }
         unsafe {
-            ((*self.effect).processReplacing)(
-                self.effect,
+            ((*self.get_effect()).processReplacing)(
+                self.get_effect(),
                 buffer.raw_inputs().as_ptr() as *const *const _,
                 buffer.raw_outputs().as_mut_ptr() as *mut *mut _,
                 buffer.samples() as i32,
@@ -638,8 +739,8 @@ impl Plugin for PluginInstance {
             panic!("Too few outputs in AudioBuffer");
         }
         unsafe {
-            ((*self.effect).processReplacingF64)(
-                self.effect,
+            ((*self.get_effect()).processReplacingF64)(
+                self.get_effect(),
                 buffer.raw_inputs().as_ptr() as *const *const _,
                 buffer.raw_outputs().as_mut_ptr() as *mut *mut _,
                 buffer.samples() as i32,
@@ -656,6 +757,40 @@ impl Plugin for PluginInstance {
             0.0,
         );
     }
+
+    fn get_input_info(&self, input: i32) -> ChannelInfo {
+        let mut props: MaybeUninit<api::ChannelProperties> = MaybeUninit::uninit();
+        let ptr = props.as_mut_ptr() as *mut c_void;
+
+        self.dispatch(plugin::OpCode::GetInputInfo, input, 0, ptr, 0.0);
+
+        ChannelInfo::from(unsafe { props.assume_init() })
+    }
+
+    fn get_output_info(&self, output: i32) -> ChannelInfo {
+        let mut props: MaybeUninit<api::ChannelProperties> = MaybeUninit::uninit();
+        let ptr = props.as_mut_ptr() as *mut c_void;
+
+        self.dispatch(plugin::OpCode::GetOutputInfo, output, 0, ptr, 0.0);
+
+        ChannelInfo::from(unsafe { props.assume_init() })
+    }
+
+    /*
+    fn get_editor(&mut self) -> Option<Box<dyn Editor>> {
+        if self.is_editor_active {
+            // An editor is already active, the caller should be using the active editor instead of
+            // requesting for a new one.
+            return None;
+        }
+
+        self.is_editor_active = true;
+        Some(Box::new(EditorInstance {
+            params: self.params.clone(),
+            is_open: false,
+        }))
+    }
+    */
 
     // TODO: Editor
 
@@ -705,24 +840,6 @@ impl Plugin for PluginInstance {
             data.as_ptr() as *mut c_void,
             0.0,
         );
-    }
-
-    fn get_input_info(&self, input: i32) -> ChannelInfo {
-        let mut props = unsafe { mem::uninitialized() };
-        let ptr = &mut props as *mut api::ChannelProperties as *mut c_void;
-
-        self.dispatch(plugin::OpCode::GetInputInfo, input, 0, ptr, 0.0);
-
-        ChannelInfo::from(props)
-    }
-
-    fn get_output_info(&self, output: i32) -> ChannelInfo {
-        let mut props = unsafe { mem::uninitialized() };
-        let ptr = &mut props as *mut api::ChannelProperties as *mut c_void;
-
-        self.dispatch(plugin::OpCode::GetOutputInfo, output, 0, ptr, 0.0);
-
-        ChannelInfo::from(props)
     }
 }
 
@@ -774,10 +891,8 @@ impl<T: Float> HostBuffer<T> {
         output_arrays: &mut [O],
     ) -> AudioBuffer<'a, T>
     where
-        I: AsRef<[T]>,
-        O: AsMut<[T]>,
-        I: 'a,
-        O: 'a,
+        I: AsRef<[T]> + 'a,
+        O: AsMut<[T]> + 'a,
     {
         // Check that number of desired inputs and outputs fit in allocation
         if input_arrays.len() > self.inputs.len() {
@@ -846,7 +961,7 @@ impl<T: Float> HostBuffer<T> {
 ///
 /// The issue with this approach is that if 2 plugins are simultaneously loaded with 2 different
 /// host instances, this might fail as one host may receive a pointer to the other one. In practice
-/// this is a rare situation as you normally won't have 2 seperate host instances loading at once.
+/// this is a rare situation as you normally won't have 2 separate host instances loading at once.
 ///
 /// [reserved field]: ../api/struct.AEffect.html#structfield.reserved1
 static mut LOAD_POINTER: *mut c_void = 0 as *mut c_void;
@@ -889,7 +1004,7 @@ mod tests {
 
     #[test]
     fn host_buffer() {
-        const LENGTH: usize = 1000000;
+        const LENGTH: usize = 1_000_000;
         let mut host_buffer: HostBuffer<f32> = HostBuffer::new(2, 2);
         let input_left = vec![1.0; LENGTH];
         let input_right = vec![1.0; LENGTH];
