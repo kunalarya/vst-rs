@@ -3,33 +3,26 @@
 [![Appveyor Build][appv-img]][appv-url]
 [![crates.io][crates-img]][crates-url]
 
-[Join the Rust VST chat](https://tinyurl.com/ya5ff5ef) (for web users, make sure you're [registered/logged in](https://web.telegram.org))
-
 A library to help facilitate creating VST plugins in rust.
 
 This library is a work in progress and as such does not yet implement all
 opcodes. It is enough to create basic VST plugins without an editor interface.
 
+Note that this is a fork of the original `vst-rs` crate pre-1.0, and thus
+users are responsible for parameter safety (namely accessing/mutating parameters
+from different threads).
+
+This library is been kept up-to-date with upstream on a best effort basis.
+
 ## Library Documentation
   * https://rust-dsp.github.io/rust-vst
 
-## TODO
-  - Implement all opcodes
-  - Proper editor support
-  - Write more tests
-  - Provide better examples
-  
 ## Crate
-`VST` is available on [crates.io](https://crates.io/crates/vst).  If you prefer the bleeding-edge, you can also
-include the crate directly from the official [Github repository](https://github.com/rust-dsp/rust-vst). 
 
+To use this crate, get it directly from Github.
 ```toml
-# get from crates.io.
-vst = "0.0.1"
-```
-```toml
-# get directly from Github.  This might be unstable!
-vst = { git = "https://github.com/rust-dsp/rust-vst" }
+# get directly from Github.  This will be unstable!
+vst = { git = "https://github.com/kunalarya/rust-unsafe-vst" }
 ```
 
 ## Usage
@@ -82,13 +75,6 @@ name = "basicvst"
 crate-type = ["cdylib"]
 ```
 
-[trav-img]: https://travis-ci.org/rust-dsp/rust-vst.svg?branch=master
-[trav-url]: https://travis-ci.org/rust-dsp/rust-vst
-[appv-img]: https://ci.appveyor.com/api/projects/status/npiyjfithlx50hfs?svg=true
-[appv-url]: https://ci.appveyor.com/project/rustdsp/rust-vst
-[crates-img]: https://img.shields.io/crates/v/vst.svg
-[crates-url]: https://crates.io/crates/vst
-
 #### Packaging on OS X
 
 On OS X VST plugins are packaged inside of loadable bundles. 
@@ -102,4 +88,5 @@ Creates a Plugin.vst bundle
 ```
 
 ## Special Thanks
+The authors of the `vst-rs` crate.
 [Marko Mijalkovic](https://github.com/overdrivenpotato) for [initiating this project](https://github.com/overdrivenpotato/rust-vst2)
